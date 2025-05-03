@@ -1,0 +1,12 @@
+[build]
+jobs = 32
+rustflags = ["-C", "target-cpu=native"]
+
+[profile.dev]
+incremental = true
+opt-level = 1
+
+[profile.release]
+opt-level = "z"
+codegen-units = 1
+lto = true
