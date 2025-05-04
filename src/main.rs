@@ -1,59 +1,95 @@
-use winit::{
-    application::ApplicationHandler,
-    dpi::{LogicalPosition, LogicalSize},
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
-    window::{Window, WindowAttributes},
-};
+use iced::Task;
+use iced::{Application, Settings};
 
-struct App {
-    window: Option<Window>,
+fn main() -> iced::Result {
+    WidgetryApp::run(Settings::default())
 }
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let monitors: Vec<_> = event_loop.available_monitors().collect();
-        let second_monitor = monitors.get(1).expect("No second monitor found!");
-        let monitor_pos = second_monitor.position();
+use nvml_wrapper::Nvml;
+use nvml_wrapper::device::Device;
 
-        let window_attributes = Window::default_attributes()
-            .with_title("Widgetry")
-            .with_inner_size(LogicalSize::new(500.0, 200.0))
-            .with_position(LogicalPosition::new(
-                monitor_pos.x as f64 + 100.0,
-                monitor_pos.y as f64 + 100.0,
-            ))
-            .with_resizable(false)
-            .with_decorations(false);
+struct WidgetryApp<'a> {
+    nvml: Nvml,
+    device: Device<'a>,
+    used_mib: u64,
+    total_mib: u64,
+}
 
-        let window = event_loop
-            .create_window(window_attributes)
-            .expect("Failed to create window.");
+enum Message {
+    Tick,
+    VramPolled(Result<(u64, u64), String>),
+}
 
-        self.window = Some(window);
+use iced::widget::{column, text};
+use iced::{Element, Subscription, Theme, executor};
+use std::time::Duration;
+
+impl<'a> Application for WidgetryApp<'a> {
+    type Executor = executor::Default;
+    type Message = message;
+    type Theme = Theme;
+    type Flags = ();
+
+    fn new(_flags: ()) -> (Self, Task<Self::Message>) {
+        // Initialize nvml and device
+        let nvml = Nvml::init().expect("Failed to init Nvml");
+        let device = nvml.device_by_index(0).expect("No GPU at index 0");
+
+        (
+            WidgetryApp {
+                nvml,
+                device,
+                used_mib: 0,
+                total_mib: 0,
+            },
+            Task::none(),
+        )
     }
 
-    fn window_event(
-            &mut self,
-            _event_loop: &ActiveEventLoop,
-            window_id: winit::window::WindowId,
-            event: WindowEvent,
-        ) {
-            if let Some(ref window) = self.window {
-                if window.id() == window_id {
-                    match event {
-                        WindowEvent::CloseRequested => {
-                            println!("Close requested");
-                        }
-                        _ => {}
-                    }
-                }
+    fn title(&self) -> String {
+        String::from("WidgetryApp VRAM Sampler")
+    }
+
+    fn Theme(&self) -> Theme {
+        Theme::Dark
+    }
+
+    fn Subscription(&self) -> Subscription<self::Message> {
+        time::every(Duration::from_secs(1)).map(|_| Message::Tick)
+    }
+
+    fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
+        match message {
+            Message::Tick => {
+                // Re-initialize NVML each time instead of trying to clone Device
+                let task = async {
+                    let nvml = Nvml::init().map_err(|e| e.to_string())?;
+                    let device = nvml.device_by_index(0).map_err(|e| e.to_string())?;
+
+                    device
+                        .memory_info()
+                        .map(|mem| (mem.used / 1024 / 1024, mem.total / 1024 / 1024))
+                        .map_err(|e| e.to_string())
+                };
+
+                Task::perform(task, Message::VramPolled)
+            }
+
+            Message::VramPolled(Ok((used, total))) => {
+                self.used_mib = used;
+                self.total_mib = total;
+                Task::none()
+            }
+
+            Message::VramPolled(Err(err)) => {
+                eprintln!("VRAM polling error: {err}");
+                Task::none()
             }
         }
     }
 
-fn main() -> Result<(), winit::error::EventLoopError> {
-    let event_loop = EventLoop::new()?;
-    let mut app = App { window: None };
-    event_loop.run_app(&mut app)
+    fn view(&self) -> Element<'_, Self::Message> {
+        let label = format!("VRAM usage: {} / {} MiB", self.used_mib, self.total_mib);
+        column![text(label)].into()
+    }
 }
